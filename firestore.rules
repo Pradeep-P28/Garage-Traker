@@ -1,0 +1,115 @@
+rules_version = '2';
+
+// Garage Ledger — role-based rules
+//   ADMIN    : emails in the list below (must match ADMIN_EMAILS in the HTML). Full access to their own business.
+//   STAFF    : emails the admin registered in /staffInvites. Can only read/write service entries (no prices/stock).
+//   CUSTOMER : any verified Google user. Can send requests and read only their own requests + the price-free service list.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function verified() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+    // >>> EDIT: same email(s) as ADMIN_EMAILS in car-service-tracker.html (use lowercase) <<<
+    function isAdmin() {
+      return verified() && myEmail() in ['replace-with-your-admin-email@gmail.com'];
+    }
+    function isOwner(biz) {
+      return isAdmin() && request.auth.uid == biz;
+    }
+    function inviteDoc() {
+      return get(/databases/$(database)/documents/staffInvites/$(myEmail()));
+    }
+    function isStaff(biz) {
+      return verified()
+        && exists(/databases/$(database)/documents/staffInvites/$(myEmail()))
+        && inviteDoc().data.businessId == biz
+        && inviteDoc().data.active == true;
+    }
+
+    // ---- Staff registrations (admin adds staff emails here) ----
+    match /staffInvites/{em} {
+      allow get: if verified() && myEmail() == em;
+      allow list: if isAdmin() && resource.data.businessId == request.auth.uid;
+      allow create: if isAdmin()
+        && request.resource.data.businessId == request.auth.uid
+        && request.resource.data.email == em
+        && em == em.lower();
+      allow update: if isAdmin()
+        && resource.data.businessId == request.auth.uid
+        && request.resource.data.businessId == request.auth.uid;
+      allow delete: if isAdmin() && resource.data.businessId == request.auth.uid;
+    }
+
+    // ---- Everything under a business belongs to its admin ----
+    match /businesses/{biz}/{path=**} {
+      allow read, write: if isOwner(biz);
+    }
+    match /businesses/{biz} {
+      allow read, write: if isOwner(biz);
+    }
+
+    // ---- Price-free service list, readable by any signed-in (verified) user ----
+    match /businesses/{biz}/public/{docId} {
+      allow read: if verified();
+    }
+
+    // ---- Staff service entries ----
+    match /businesses/{biz}/staffEntries/{entryId} {
+      function entryOk(d) {
+        return d.keys().hasOnly(['customerName','phone','carModel','carReg','carColour','checkinDate','deliveryDate',
+                                 'serviceIds','serviceNames','notes','status','createdAt','updatedAt',
+                                 'createdByUid','createdByEmail','createdByName'])
+          && d.keys().hasAll(['customerName','phone','carModel','carReg','carColour','checkinDate','deliveryDate',
+                              'serviceIds','serviceNames','notes','status','createdAt','createdByUid','createdByEmail','createdByName'])
+          && d.customerName is string && d.customerName.size() > 0 && d.customerName.size() <= 100
+          && d.phone is string && d.phone.size() <= 20
+          && d.carModel is string && d.carModel.size() > 0 && d.carModel.size() <= 100
+          && d.carReg is string && d.carReg.size() <= 20
+          && d.carColour is string && d.carColour.size() <= 40
+          && d.notes is string && d.notes.size() <= 1000
+          && d.serviceIds is list && d.serviceIds.size() > 0 && d.serviceIds.size() <= 30
+          && d.serviceNames is list && d.serviceNames.size() <= 30
+          && d.status == 'pending'
+          && d.createdByUid == request.auth.uid;
+      }
+      allow read: if isStaff(biz);
+      allow create: if isStaff(biz) && entryOk(request.resource.data);
+      allow update: if isStaff(biz)
+        && resource.data.createdByUid == request.auth.uid
+        && resource.data.status == 'pending'
+        && entryOk(request.resource.data);
+      allow delete: if isStaff(biz)
+        && resource.data.createdByUid == request.auth.uid
+        && resource.data.status == 'pending';
+    }
+
+    // ---- Customer requests ----
+    match /businesses/{biz}/requests/{reqId} {
+      function reqOk(d) {
+        return d.keys().hasOnly(['name','phone','carModel','carReg','carColour','preferredDate',
+                                 'desiredServiceIds','desiredServiceNames','notes','status','submittedAt',
+                                 'customerUid','customerEmail'])
+          && d.keys().hasAll(['name','phone','carModel','carReg','carColour','preferredDate',
+                              'desiredServiceIds','desiredServiceNames','notes','status','submittedAt',
+                              'customerUid','customerEmail'])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 100
+          && d.phone is string && d.phone.size() >= 7 && d.phone.size() <= 20
+          && d.carModel is string && d.carModel.size() > 0 && d.carModel.size() <= 100
+          && d.carReg is string && d.carReg.size() <= 20
+          && d.carColour is string && d.carColour.size() <= 40
+          && d.notes is string && d.notes.size() <= 1000
+          && d.desiredServiceIds is list && d.desiredServiceIds.size() > 0 && d.desiredServiceIds.size() <= 30
+          && d.desiredServiceNames is list && d.desiredServiceNames.size() <= 30
+          && d.status == 'new'
+          && d.customerUid == request.auth.uid;
+      }
+      allow read: if verified() && resource.data.customerUid == request.auth.uid;
+      allow create: if verified() && reqOk(request.resource.data);
+    }
+  }
+}
